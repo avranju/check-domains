@@ -72,13 +72,16 @@ async fn worker_openssl(index: usize, mut rx: mpsc::Receiver<Domain>) -> Result<
         let stream = StdTcpStream::connect(&host)?;
         match connector.connect(&domain.domain, stream) {
             Ok(_) => println!("[{index}] ok {}", domain),
-            Err(err) => {
-                if let Some(src) = err.source().and_then(|e| e.downcast_ref::<SslError>()) {
-                    if src.code().as_raw() == 5 {
-                        eprintln!("BLOCKED! domain {}", domain);
-                    }
-                }
+            Err(err)
+                if Some(5)
+                    == err
+                        .source()
+                        .and_then(|e| e.downcast_ref::<SslError>())
+                        .map(|e| e.code().as_raw()) =>
+            {
+                eprintln!("BLOCKED! domain {}", domain);
             }
+            Err(_) => {}
         }
     }
 

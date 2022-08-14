@@ -4,7 +4,8 @@ use anyhow::Result;
 use futures_util::future::join_all;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::{net::TcpStream, sync::mpsc};
+use tokio_native_tls::{native_tls, TlsConnector};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Domain {
@@ -38,7 +39,7 @@ async fn main() -> Result<()> {
     let workers = channels
         .into_iter()
         .enumerate()
-        .map(|(index, (tx, rx))| (tx, tokio::spawn(worker_http(index, rx))))
+        .map(|(index, (tx, rx))| (tx, tokio::spawn(worker_tls(index, rx))))
         .collect::<Vec<_>>();
 
     if let Some(file_name) = env::args().nth(1) {
@@ -62,7 +63,26 @@ fn usage() {
     eprintln!("Usage:\n  check-domains <<domains.csv>>");
 }
 
-async fn worker_http(index: usize, mut rx: mpsc::Receiver<Domain>) -> Result<()> {
+async fn worker_tls(index: usize, mut rx: mpsc::Receiver<Domain>) -> Result<()> {
+    while let Some(domain) = rx.recv().await {
+        let host = format!("{}:443", domain.domain);
+        let stream = TcpStream::connect(&host).await?;
+        let connector = TlsConnector::from(native_tls::TlsConnector::new()?);
+        match connector
+            .connect(&domain.domain, stream)
+            .await
+            .map_err(|e| e.to_string())
+        {
+            Ok(_) => println!("[{index}] ok {}", domain),
+            Err(err) if err.contains("EOF") => eprintln!("[{index}] BLOCKED! domain {}", domain),
+            Err(err) => eprintln!("ERR! domain {}, {}", domain, err),
+        }
+    }
+
+    Ok(())
+}
+
+async fn _worker_http(index: usize, mut rx: mpsc::Receiver<Domain>) -> Result<()> {
     let client = Client::new();
 
     while let Some(domain) = rx.recv().await {

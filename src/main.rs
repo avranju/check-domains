@@ -1,7 +1,8 @@
-use std::{env, fmt::Display};
+use std::{env, error::Error, fmt::Display, net::TcpStream as StdTcpStream};
 
 use anyhow::Result;
 use futures_util::future::join_all;
+use openssl::ssl::{Error as SslError, SslConnector, SslMethod};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use tokio::{net::TcpStream, sync::mpsc};
@@ -39,7 +40,7 @@ async fn main() -> Result<()> {
     let workers = channels
         .into_iter()
         .enumerate()
-        .map(|(index, (tx, rx))| (tx, tokio::spawn(worker_tls(index, rx))))
+        .map(|(index, (tx, rx))| (tx, tokio::spawn(worker_openssl(index, rx))))
         .collect::<Vec<_>>();
 
     if let Some(file_name) = env::args().nth(1) {
@@ -63,7 +64,28 @@ fn usage() {
     eprintln!("Usage:\n  check-domains <<domains.csv>>");
 }
 
-async fn worker_tls(index: usize, mut rx: mpsc::Receiver<Domain>) -> Result<()> {
+async fn worker_openssl(index: usize, mut rx: mpsc::Receiver<Domain>) -> Result<()> {
+    let connector = SslConnector::builder(SslMethod::tls_client())?.build();
+
+    while let Some(domain) = rx.recv().await {
+        let host = format!("{}:443", domain.domain);
+        let stream = StdTcpStream::connect(&host)?;
+        match connector.connect(&domain.domain, stream) {
+            Ok(_) => println!("[{index}] ok {}", domain),
+            Err(err) => {
+                if let Some(src) = err.source().and_then(|e| e.downcast_ref::<SslError>()) {
+                    if src.code().as_raw() == 5 {
+                        eprintln!("BLOCKED! domain {}", domain);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn _worker_tls(index: usize, mut rx: mpsc::Receiver<Domain>) -> Result<()> {
     while let Some(domain) = rx.recv().await {
         let host = format!("{}:443", domain.domain);
         let stream = TcpStream::connect(&host).await?;
@@ -75,7 +97,7 @@ async fn worker_tls(index: usize, mut rx: mpsc::Receiver<Domain>) -> Result<()> 
         {
             Ok(_) => println!("[{index}] ok {}", domain),
             Err(err) if err.contains("EOF") => eprintln!("[{index}] BLOCKED! domain {}", domain),
-            Err(err) => eprintln!("ERR! domain {}, {}", domain, err),
+            Err(_) => {}
         }
     }
 
